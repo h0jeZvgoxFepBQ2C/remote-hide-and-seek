@@ -183,6 +183,13 @@ class BleLink(
     @Volatile override var active = false
         private set
 
+    /** Funk ist vorhanden, aber ausgeschaltet - dann fehlt der halbe Spass. */
+    val adapterOff: Boolean
+        get() = runCatching {
+            val a = (ctx.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
+            a != null && !a.isEnabled
+        }.getOrDefault(false)
+
     private var advertiser: BluetoothLeAdvertiser? = null
     private var scanner: BluetoothLeScanner? = null
     private var advertising: AdvertiseCallback? = null

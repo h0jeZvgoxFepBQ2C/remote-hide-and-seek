@@ -2,6 +2,7 @@ package at.flave.versteckspiel
 
 import android.Manifest
 import android.app.Activity
+import android.bluetooth.BluetoothAdapter
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -50,6 +51,10 @@ class MainActivity : Activity() {
     private var statusHold = 0L
     /** Gewaehlter Reiter der Fernbedienung. */
     private var currentTab = 0
+
+    /** Kleine Geraete (z.B. Handhelds) brauchen knappere Abstaende. */
+    private val compact by lazy { resources.configuration.screenHeightDp < 720 }
+    private var bluetoothAsked = false
     private var customPage: LinearLayout? = null
     /** Punktreihe je Aufnahmeplatz: ein Punkt pro anderem Handy. */
     private val slotDots = HashMap<Int, LinearLayout>()
@@ -70,8 +75,12 @@ class MainActivity : Activity() {
         // Nach der Abschaltautomatik ist der Dienst weg, die App aber noch
         // offen - beim Zurueckkommen also wieder anwerfen.
         if (!PlayerService.isRunning) startPlayerService()
+        // Kommt man aus den Bluetooth-Einstellungen zurueck, soll der Kanal
+        // sofort hochfahren und nicht erst beim naechsten Abgleich.
+        Peer.current?.retryBluetooth()
         PlayerService.listener = { ev -> ui.post { handle(ev) } }
         Peer.current?.touch()          // Bedienung zaehlt als Lebenszeichen
+        ui.postDelayed({ offerBluetooth() }, 1500)
         render(Peer.current?.role ?: Role.CONTROL, fresh = false)
         startTicking()
     }
@@ -155,13 +164,16 @@ class MainActivity : Activity() {
         val lvl = LevelView(this).apply { visibility = View.INVISIBLE }
         level = lvl
         root.addView(title); root.addView(st)
-        root.addView(lvl, LinearLayout.LayoutParams(dp(200), dp(46))
-            .apply { gravity = Gravity.CENTER_HORIZONTAL; setMargins(0, dp(4), 0, dp(8)) })
+        root.addView(
+            lvl,
+            LinearLayout.LayoutParams(dp(if (compact) 160 else 200), dp(if (compact) 30 else 46))
+                .apply { gravity = Gravity.CENTER_HORIZONTAL; setMargins(0, dp(2), 0, dp(6)) }
+        )
 
         // Reiter - nur zeigen, wenn es mehr als eine Kategorie gibt
         val page = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(tabBar { fillGrid(page, it) },
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(54))
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(if (compact) 44 else 54))
                 .apply { setMargins(dp(5), 0, dp(5), dp(6)) })
         fillGrid(page, currentTab)
         root.addView(page, grow())
@@ -323,12 +335,12 @@ class MainActivity : Activity() {
             isClickable = true
         }
         card.addView(
-            label("🎤", 30f, Color.WHITE),
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(46))
+            fitLabel("🎤", 30f, Color.WHITE),
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 2f)
         )
         card.addView(
-            label("Aufnahme ${slot + 1}", 15f, Color.WHITE, bold = true),
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(22))
+            fitLabel("Aufnahme ${slot + 1}", 15f, Color.WHITE, bold = true),
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
         )
         val dots = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -337,8 +349,7 @@ class MainActivity : Activity() {
         slotDots[slot] = dots
         card.addView(
             dots,
-            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(18))
-                .apply { topMargin = dp(4) }
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.75f)
         )
 
         // Kurz tippen ruft auf, gedrueckt halten nimmt auf - und die Aufnahme
@@ -538,12 +549,23 @@ class MainActivity : Activity() {
         return true
     }
 
+    /**
+     * Ist Bluetooth aus, laeuft das Spiel nur ueber WLAN - ohne Hinweis raetselt
+     * man daran herum. Einschalten darf die App nicht selbst, aber fragen schon.
+     */
+    private fun offerBluetooth() {
+        if (bluetoothAsked || Peer.current?.bluetoothOff() != true) return
+        bluetoothAsked = true
+        runCatching { startActivity(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)) }
+    }
+
     /** Bluetooth darf erst nach erteilter Berechtigung starten. */
     override fun onRequestPermissionsResult(
         requestCode: Int, permissions: Array<out String>, grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         Peer.current?.retryBluetooth()
+        ui.postDelayed({ offerBluetooth() }, 800)
         if (requestCode == 43) customPage?.let { fillCustom(it) } else askForBatteryFreedom()
     }
 
@@ -574,6 +596,19 @@ class MainActivity : Activity() {
             if (bold) typeface = Typeface.DEFAULT_BOLD
         }
 
+    /**
+     * Beschriftung, die sich an die verfuegbare Hoehe anpasst. Ohne das
+     * verschwinden auf kleineren Bildschirmen die Tiernamen unter dem Rand.
+     */
+    private fun fitLabel(text: String, maxSp: Float, color: Int, bold: Boolean = false) =
+        label(text, maxSp, color, bold).apply {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                setAutoSizeTextTypeUniformWithConfiguration(
+                    9, maxSp.toInt().coerceAtLeast(10), 1, TypedValue.COMPLEX_UNIT_SP
+                )
+            }
+        }
+
     private fun card(emoji: String, title: String, sub: String, color: Int, onClick: () -> Unit) =
         LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -583,14 +618,19 @@ class MainActivity : Activity() {
                 setColor(color); cornerRadius = dp(22).toFloat()
             }
             isClickable = true
-            if (emoji.isNotEmpty()) addView(label(emoji, 44f, Color.WHITE))
-            val titleView = label(title, 20f, Color.WHITE, bold = true)
-            val subView = label(sub, 13f, 0xCCFFFFFF.toInt()).apply {
-                setPadding(0, dp(4), 0, 0)
+            // Gewichtete Zeilen: die Kachel teilt ihre Hoehe auf, statt den
+            // Inhalt bei knappem Platz abzuschneiden.
+            if (emoji.isNotEmpty()) addView(
+                fitLabel(emoji, 44f, Color.WHITE),
+                LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 2.2f)
+            )
+            val titleView = fitLabel(title, 20f, Color.WHITE, bold = true)
+            val subView = fitLabel(sub, 13f, 0xCCFFFFFF.toInt()).apply {
                 if (sub.isEmpty()) visibility = View.GONE
             }
             tag = arrayOf(titleView, subView)      // damit Beschriftungen aenderbar bleiben
-            addView(titleView); addView(subView)
+            addView(titleView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            addView(subView, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.8f))
             setOnClickListener {
                 performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
                 animate().scaleX(0.94f).scaleY(0.94f).setDuration(70).withEndAction {

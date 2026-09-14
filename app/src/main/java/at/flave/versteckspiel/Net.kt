@@ -172,8 +172,13 @@ class Peer(private val ctx: Context, private val onEvent: (Event) -> Unit) {
     /** Welche Wege gerade wirklich laufen, z.B. "WLAN + Bluetooth". */
     fun channels(): String {
         val on = links.filter { it.active }.map { it.name }
-        return if (on.isEmpty()) "kein Funk" else on.joinToString(" + ")
+        val text = if (on.isEmpty()) "kein Funk" else on.joinToString(" + ")
+        // Sonst raetselt man, warum nur der halbe Funk laeuft.
+        return if (!ble.active && ble.adapterOff) "$text · Bluetooth aus" else text
     }
+
+    /** Ist Bluetooth vorhanden, aber abgeschaltet? */
+    fun bluetoothOff() = !ble.active && ble.adapterOff
 
     fun secondsLeft(): Int {
         if (!auto || nextAt == 0L) return 0
@@ -383,9 +388,15 @@ class Peer(private val ctx: Context, private val onEvent: (Event) -> Unit) {
         var round = 0
         while (running) {
             transmit(Op.PING, recordings.mask())
-            // Alle zehn Sekunden eine Aufnahme nachliefern, die anderswo fehlt -
-            // so holen auch Handys auf, die beim Aufnehmen nicht dabei waren.
-            if (++round % 5 == 0) resendMissing()
+            if (++round % 5 == 0) {
+                // Alle zehn Sekunden eine Aufnahme nachliefern, die anderswo
+                // fehlt - so holen auch Handys auf, die beim Aufnehmen nicht
+                // dabei waren.
+                resendMissing()
+                // Und Bluetooth nachziehen, falls es erst jetzt eingeschaltet
+                // wurde. Beide Aufrufe kosten nichts, wenn schon alles laeuft.
+                retryBluetooth()
+            }
             Thread.sleep(2000)
         }
     }.start()
